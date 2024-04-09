@@ -205,7 +205,8 @@ contract Space is ISpace, Initializable, IERC4824, UUPSUpgradeable, OwnableUpgra
             proposal,
             totalForVotes,
             totalAgainstVotes,
-            totalAbstainVotes
+            totalAbstainVotes,
+            encryptedVotes
         );
     }
 
@@ -333,7 +334,15 @@ contract Space is ISpace, Initializable, IERC4824, UUPSUpgradeable, OwnableUpgra
         uint256 againstVotes = TFHE.decrypt(encryptedTalliesAgainst[proposalId]);
         uint256 abstainVotes = TFHE.decrypt(encryptedTalliesAbstain[proposalId]);
 
-        // Simplified majority check for example purposes
+        proposal.executionStrategy.execute(
+            proposalId,
+            cachedProposal,
+            forVotes,
+            againstVotes,
+            abstainVotes,
+            encryptedVotes,
+            executionPayload
+        );
         if (forVotes > againstVotes) {
             proposal.finalizationStatus = FinalizationStatus.Executed;
             emit ProposalExecuted(proposalId);
