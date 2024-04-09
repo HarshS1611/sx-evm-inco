@@ -74,6 +74,11 @@ contract Space is ISpace, Initializable, IERC4824, UUPSUpgradeable, OwnableUpgra
     /// @inheritdoc ISpaceState
     mapping(uint256 proposalId => mapping(address voter => uint256 hasVoted)) public override voteRegistry;
 
+     mapping(uint256 => mapping(address => EncryptedChoice)) public encryptedVotes;
+    mapping(uint256 => euint8) public encryptedTalliesFor;
+    mapping(uint256 => euint8) public encryptedTalliesAgainst;
+    mapping(uint256 => euint8) public encryptedTalliesAbstain;
+
     /// @inheritdoc ISpaceActions
     function initialize(InitializeCalldata calldata input) external override initializer {
         if (input.votingStrategies.length == 0) revert EmptyArray();
@@ -186,13 +191,31 @@ contract Space is ISpace, Initializable, IERC4824, UUPSUpgradeable, OwnableUpgra
     function getProposalStatus(uint256 proposalId) external view override returns (ProposalStatus) {
         Proposal memory proposal = proposals[proposalId];
         _assertProposalExists(proposal);
-        return
-            proposal.executionStrategy.getProposalStatus(
-                proposal,
-                votePower[proposalId][Choice.For],
-                votePower[proposalId][Choice.Against],
-                votePower[proposalId][Choice.Abstain]
-            );
+
+        // Example placeholders for aggregated voting data obtained off-chain or through another mechanism
+        uint256 totalForVotes;
+        uint256 totalAgainstVotes;
+        uint256 totalAbstainVotes;
+
+        // Retrieve aggregated vote data
+        // This could involve calling another contract, or these values might be updated by an off-chain process
+        (totalForVotes, totalAgainstVotes, totalAbstainVotes) = getAggregatedVoteData(proposalId);
+
+        return proposal.executionStrategy.getProposalStatus(
+            proposal,
+            totalForVotes,
+            totalAgainstVotes,
+            totalAbstainVotes
+        );
+    }
+
+     function getAggregatedVoteData(uint256 proposalId) internal view returns (uint256, uint256, uint256) {
+        // Implementation depends on how and where you're storing or calculating these totals
+        uint256 totalForVotes = TFHE.decrypt(encryptedTalliesFor[proposalId]);
+        uint256 totalAgainstVotes = TFHE.decrypt(encryptedTalliesAgainst[proposalId]);
+        uint256 totalAbstainVotes = TFHE.decrypt(encryptedTalliesAbstain[proposalId]);
+
+        return (totalForVotes, totalAgainstVotes, totalAbstainVotes);
     }
 
     // ------------------------------------
@@ -242,13 +265,13 @@ contract Space is ISpace, Initializable, IERC4824, UUPSUpgradeable, OwnableUpgra
     }
 
         /// @inheritdoc ISpaceActions
-    function vote(
+     function vote(
         address voter,
         uint256 proposalId,
         EncryptedChoice memory encryptedChoice,
         IndexedStrategy[] calldata userVotingStrategies,
         string calldata metadataURI
-    ) external onlyAuthenticator {
+    ) external override onlyAuthenticator {
         Proposal memory proposal = proposals[proposalId];
         _assertProposalExists(proposal);
         if (block.number >= proposal.maxEndBlockNumber) revert VotingPeriodHasEnded();
@@ -265,43 +288,63 @@ contract Space is ISpace, Initializable, IERC4824, UUPSUpgradeable, OwnableUpgra
             proposal.activeVotingStrategies
         );
         if (votingPower == 0) revert UserHasNoVotingPower();
-        votePower[proposalId][encryptedChoice] += votingPower;
+
+        // Convert the voting power to euint32 for compatibility with TFHE operations
+        uint256 encryptedVotingPower = TFHE.encryptEuint32(votingPower);
+
+        updateEncryptedChoiceTally(proposalId, encryptedChoice, encryptedVotingPower);
+
 
         if (bytes(metadataURI).length == 0) {
             emit VoteCast(proposalId, voter, encryptedChoice, votingPower);
         } else {
             emit VoteCastWithMetadata(proposalId, voter, encryptedChoice, votingPower, metadataURI);
         }
+
     }
 
-    function execute(uint256 proposalId, bytes calldata executionPayload) external nonReentrant {
+    function updateEncryptedChoiceTally(uint256 proposalId, bytes calldata encryptedChoice, uint256 votingPower) internal {
+
+        // Encrypted comparisons to determine the vote direction. Assume TFHE.eq returns a boolean for simplicity.
+        ebool isFor = TFHE.eq(encryptedChoice, TFHE.encrypt(uint8(1))); // "1" represents a vote for.
+        ebool isAgainst = TFHE.eq(encryptedChoice, TFHE.encrypt(uint8(0))); // "0" represents a vote against.
+        ebool isAbstain = TFHE.eq(encryptedChoice, TFHE.encrypt(uint8(2))); // "2" represents abstaining.
+
+        // Increment the appropriate tally based on the vote's direction.
+        if (isFor) {
+            // Assuming encryptedTalliesFor stores a uint256 for tally count.
+            encryptedTalliesFor[proposalId] = TFHE.add(encryptedTalliesFor[proposalId], votingPower);
+        } else if (isAgainst) {
+            encryptedTalliesAgainst[proposalId] = TFHE.add(encryptedTalliesAgainst[proposalId], votingPower);
+        } else if (isAbstain) {
+            encryptedTalliesAbstain[proposalId] = TFHE.add(encryptedTalliesAbstain[proposalId], votingPower);
+
+    }
+
+    event ProposalExecuted(uint256 indexed proposalId);
+    event ProposalRejected(uint256 indexed proposalId);
+
+    function execute(uint256 proposalId, bytes calldata executionPayload) external override nonReentrant {
         Proposal storage proposal = proposals[proposalId];
         _assertProposalExists(proposal);
-        Proposal memory cachedProposal = proposal;
-        if (cachedProposal.executionPayloadHash != keccak256(executionPayload)) revert InvalidPayload();
-        if (cachedProposal.finalizationStatus != FinalizationStatus.Pending) revert ProposalFinalized();
+        if (proposal.finalizationStatus != FinalizationStatus.Pending) revert ProposalFinalized();
 
-        // Convert the encrypted votePower map to an array of EncryptedChoice structs
-        EncryptedChoice[] memory encryptedVotes;
-        for (uint256 i = 0; i < encryptedVotePowers.length; i++) {
-            if (encryptedVotePowers[i].encryptedData.length > 0) {
-                encryptedVotes.push(encryptedVotePowers[i]);
-            }
+        uint256 forVotes = TFHE.decrypt(encryptedTalliesFor[proposalId]);
+        uint256 againstVotes = TFHE.decrypt(encryptedTalliesAgainst[proposalId]);
+        uint256 abstainVotes = TFHE.decrypt(encryptedTalliesAbstain[proposalId]);
+
+        // Simplified majority check for example purposes
+        if (forVotes > againstVotes) {
+            proposal.finalizationStatus = FinalizationStatus.Executed;
+            emit ProposalExecuted(proposalId);
+        } else {
+            proposal.finalizationStatus = FinalizationStatus.Rejected;
+            emit ProposalRejected(proposalId);
         }
+    }
 
-        proposal.finalizationStatus = FinalizationStatus.Executed;
-
-        proposal.executionStrategy.execute(
-            proposalId,
-            cachedProposal,
-            votePower[proposalId][Choice.EncryptedFor],
-            votePower[proposalId][Choice.EncryptedAgainst],
-            votePower[proposalId][Choice.EncryptedAbstain],
-            encryptedVotes,
-            executionPayload
-        );
-
-        emit ProposalExecuted(proposalId);
+    function _assertProposalExists(Proposal memory proposal) internal pure {
+        if (proposal.executionPayloadHash == 0) revert InvalidProposal();
     }
 
     

@@ -78,10 +78,10 @@ struct EncryptedChoice {
     bool initialized;
 }
 
-enum Choice {
-    EncryptedAgainst,
-    EncryptedFor,
-    EncryptedAbstain
+struct Choice {
+    euint32 encryptedTallyFor;
+    euint32 encryptedTallyAgainst;
+    euint32 encryptedTallyAbstain; 
 }
 /// @notice Transaction struct that can be used to represent transactions inside a proposal.
 struct MetaTransaction {
