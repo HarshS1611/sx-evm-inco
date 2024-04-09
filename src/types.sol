@@ -73,12 +73,16 @@ enum ProposalStatus {
 }
 
 /// @notice The set of possible choices for a vote.
-enum Choice {
-    Against,
-    For,
-    Abstain
+struct EncryptedChoice {
+    bytes encryptedData;
+    bool initialized;
 }
 
+enum Choice {
+    EncryptedAgainst,
+    EncryptedFor,
+    EncryptedAbstain
+}
 /// @notice Transaction struct that can be used to represent transactions inside a proposal.
 struct MetaTransaction {
     address to;

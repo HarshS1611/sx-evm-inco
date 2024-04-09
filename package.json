@@ -32,5 +32,9 @@
       "prettier --check"
     ],
     "*.{json,md,yml}": "prettier --check"
+  },
+  "dependencies": {
+    "fhevm": "^0.3.0",
+    "fhevmjs": "^0.4.0"
   }
 }

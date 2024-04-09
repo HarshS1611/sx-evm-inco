@@ -25,7 +25,9 @@ import { IExecutionStrategy } from "src/interfaces/IExecutionStrategy.sol";
 import { IProposalValidationStrategy } from "src/interfaces/IProposalValidationStrategy.sol";
 import { SXUtils } from "./utils/SXUtils.sol";
 import { BitPacker } from "./utils/BitPacker.sol";
-
+import { EncryptedChoice } from "./types.sol";
+import * as FHE from "fhevm/lib/TFHE.sol";
+import * as EIP712WithModifier from "fhevm/abstracts/EIP712WithModifier.sol";
 /// @title Space Contract
 /// @notice The core contract for Snapshot X.
 ///         A proxy of this contract should be deployed with the Proxy Factory.
@@ -239,14 +241,14 @@ contract Space is ISpace, Initializable, IERC4824, UUPSUpgradeable, OwnableUpgra
         nextProposalId++;
     }
 
-    /// @inheritdoc ISpaceActions
+        /// @inheritdoc ISpaceActions
     function vote(
         address voter,
         uint256 proposalId,
-        Choice choice,
+        EncryptedChoice memory encryptedChoice,
         IndexedStrategy[] calldata userVotingStrategies,
         string calldata metadataURI
-    ) external override onlyAuthenticator {
+    ) external onlyAuthenticator {
         Proposal memory proposal = proposals[proposalId];
         _assertProposalExists(proposal);
         if (block.number >= proposal.maxEndBlockNumber) revert VotingPeriodHasEnded();
@@ -263,38 +265,50 @@ contract Space is ISpace, Initializable, IERC4824, UUPSUpgradeable, OwnableUpgra
             proposal.activeVotingStrategies
         );
         if (votingPower == 0) revert UserHasNoVotingPower();
-        votePower[proposalId][choice] += votingPower;
+        votePower[proposalId][encryptedChoice] += votingPower;
 
         if (bytes(metadataURI).length == 0) {
-            emit VoteCast(proposalId, voter, choice, votingPower);
+            emit VoteCast(proposalId, voter, encryptedChoice, votingPower);
         } else {
-            emit VoteCastWithMetadata(proposalId, voter, choice, votingPower, metadataURI);
+            emit VoteCastWithMetadata(proposalId, voter, encryptedChoice, votingPower, metadataURI);
         }
     }
 
-    /// @inheritdoc ISpaceActions
-    function execute(uint256 proposalId, bytes calldata executionPayload) external override nonReentrant {
+    function execute(uint256 proposalId, bytes calldata executionPayload) external nonReentrant {
         Proposal storage proposal = proposals[proposalId];
         _assertProposalExists(proposal);
         Proposal memory cachedProposal = proposal;
         if (cachedProposal.executionPayloadHash != keccak256(executionPayload)) revert InvalidPayload();
         if (cachedProposal.finalizationStatus != FinalizationStatus.Pending) revert ProposalFinalized();
 
-        // We update the finalization status of the proposal in the space before calling the execution strategy
-        // to avoid reentrancy issues.
+        // Convert the encrypted votePower map to an array of EncryptedChoice structs
+        EncryptedChoice[] memory encryptedVotes;
+        for (uint256 i = 0; i < encryptedVotePowers.length; i++) {
+            if (encryptedVotePowers[i].encryptedData.length > 0) {
+                encryptedVotes.push(encryptedVotePowers[i]);
+            }
+        }
+
         proposal.finalizationStatus = FinalizationStatus.Executed;
 
         proposal.executionStrategy.execute(
             proposalId,
             cachedProposal,
-            votePower[proposalId][Choice.For],
-            votePower[proposalId][Choice.Against],
-            votePower[proposalId][Choice.Abstain],
+            votePower[proposalId][Choice.EncryptedFor],
+            votePower[proposalId][Choice.EncryptedAgainst],
+            votePower[proposalId][Choice.EncryptedAbstain],
+            encryptedVotes,
             executionPayload
         );
 
         emit ProposalExecuted(proposalId);
     }
+
+    
+
+
+}
+
 
     /// @inheritdoc ISpaceOwnerActions
     function cancel(uint256 proposalId) external override onlyOwner {
